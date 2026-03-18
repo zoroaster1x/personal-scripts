@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+import os
+import sys
+import json
+import subprocess
+import argparse
+import select
+import shutil
+from rich.console import Console
+from rich.table import Table
+import yt_dlp
+
+# --- Setup Paths & Config ---
+CONFIG_DIR = os.path.expanduser("~/.config/playmusic")
+DATA_DIR = os.path.expanduser("~/.local/state/playmusic")
+os.makedirs(CONFIG_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
+
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+HIST_FILE = os.path.join(DATA_DIR, "history.json")
+FAV_FILE = os.path.join(DATA_DIR, "favorites.json")
+DOWNLOAD_DIR = os.path.expanduser("~/Music")
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+console = Console()
+
+# --- Default Config ---
+DEFAULT_CONFIG = {
+    "timeout_seconds": 20,
+    "timeout_action": "1",
+    "default_volume": 100,
+    "search_results_count": 5
+}
+
+def load_config():
+    if not os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(DEFAULT_CONFIG, f, indent=4)
+        return DEFAULT_CONFIG
+    with open(CONFIG_FILE, 'r') as f:
+        return {**DEFAULT_CONFIG, **json.load(f)}
+
+config = load_config()
+
+# --- Helper Functions ---
+def save_track(filepath, track):
+    tracks =[]
+    if os.path.exists(filepath):
+        with open(filepath, 'r') as f:
+            try:
+                tracks = json.load(f)
+            except json.JSONDecodeError:
+                pass
+
+    # Remove duplicate URL to move it to the top
+    tracks =[t for t in tracks if t.get('url') != track.get('url')]
+    tracks.insert(0, track)
+
+    with open(filepath, 'w') as f:
+        json.dump(tracks[:20], f, indent=4)  # Keep top 20
+
+def play_media(track, args):
+    save_track(HIST_FILE, track)
+
+    # Safely check if notify-send is installed using Python's shutil
+    if shutil.which("notify-send"):
+        subprocess.run(["notify-send", "🎵 Now Playing", track['title'], "-t", "3000", "--transient"], capture_output=True)
+
+    extra_args = []
+    if args.loop: extra_args.extend(["--loop-playlist=inf", "--loop-file=inf"])
+    if args.shuffle: extra_args.append("--shuffle")
+
+    # The Ultimate MPV Command
+    mpv_cmd =[
+        "mpv",
+        "--title=playmusic_daemon",
+        "--vid=no",
+        "--msg-level=all=no,statusline=status",  # Hides ALL text EXCEPT the progress bar
+        "--term-osd-bar",                        # Draws the dynamic UI bar
+        f"--term-status-msg=⏳ ${{time-pos}} / ${{duration}} (${{percent-pos}}%) │ 📻 ${{audio-bitrate}} bps",
+        "--ao=pulse",                            # Fixes early connection delay in Linux
+        "--audio-stream-silence=yes",            # Keeps Bluetooth headphones awake
+        "--cache=yes",
+        "--demuxer-max-bytes=150M",
+        "--demuxer-readahead-secs=20",
+        "--ytdl-format=bestaudio[ext=m4a]/bestaudio", # FIX: Forces m4a to stop 1-3 second end-of-track cutoffs!
+        f"--volume={args.volume}",
+        "--ytdl-raw-options=yes-playlist=,extractor-args=youtube:player_js_version=actual"
+    ] + extra_args + [track['url']]
+
+    if args.bg:
+        subprocess.Popen(mpv_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        console.print(f"[bold green]✔ Playing in background:[/bold green] {track['title']}")
+        sys.exit(0)
+
+    console.print(f"\n[bold green]▶ Playing:[/bold green][bold white]{track['title']}[/bold white]")
+    # Using raw string r"..." to prevent Python SyntaxWarnings
+    console.print(r"[dim]Controls: \[Space] Pause | \[q] Quit | \[9]/\[0] Vol Down/Up | \[Left]/\[Right] Seek[/dim]" + "\n")
+
+    try:
+        subprocess.run(mpv_cmd)
+    except KeyboardInterrupt:
+        pass
+
+def display_menu(tracks, title="Results"):
+    table = Table(title=f"[cyan bold]{title}", show_lines=False, box=None)
+    table.add_column("#", style="yellow bold", justify="right")
+    table.add_column("Track Title", style="white bold", max_width=45, no_wrap=True)
+    table.add_column("Time", style="cyan")
+    table.add_column("Channel", style="dim white", max_width=15, no_wrap=True)
+
+    is_saved_list = "history" in title.lower() or "favorites" in title.lower()
+    if is_saved_list:
+        table.add_column("URL", style="blue dim", max_width=25, no_wrap=True)
+
+    for i, t in enumerate(tracks):
+        if is_saved_list:
+            table.add_row(str(i+1), t['title'], t.get('duration', 'N/A'), t.get('channel', 'N/A'), t['url'])
+        else:
+            table.add_row(str(i+1), t['title'], t.get('duration', 'N/A'), t.get('channel', 'N/A'))
+
+    console.print(table)
+    console.print("[green]#[/green] Play | [blue]s#[/blue] Save | [magenta]d#[/magenta] DL MP3 | [red]x#[/red] Delete | [red]q[/red] Quit")
+
+    # 20 Second Timeout Logic
+    console.print(f"\n[bold cyan]Choice (Auto '{config['timeout_action']}' in {config['timeout_seconds']}s):[/bold cyan] ", end="")
+    sys.stdout.flush()
+
+    ready, _, _ = select.select([sys.stdin], [], [], config['timeout_seconds'])
+    if ready:
+        choice = sys.stdin.readline().strip().lower()
+        if choice == "": # If user just pressed Enter blindly, fallback to default
+            choice = config['timeout_action']
+    else:
+        choice = config['timeout_action']
+        console.print(f"\n[dim italic]Time's up! Auto-selecting: {choice}[/dim italic]")
+
+    return choice
+
+def load_json_list(filepath):
+    if not os.path.exists(filepath): return[]
+    with open(filepath, 'r') as f:
+        try: return json.load(f)
+        except json.JSONDecodeError: return[]
+
+# --- Main Logic ---
+def main():
+    parser = argparse.ArgumentParser(description="Ultimate CLI Music Player (Python Edition)")
+    parser.add_argument("query", nargs="*", help="Song to search for")
+    parser.add_argument("-f", "--first", action="store_true", help="Auto-play first result")
+    parser.add_argument("-a", "--album", action="store_true", help="Search for album")
+    parser.add_argument("-H", "--history", action="store_true", help="Show history")
+    parser.add_argument("-F", "--favs", action="store_true", help="Show favorites")
+    parser.add_argument("-b", "--bg", action="store_true", help="Play in background")
+    parser.add_argument("-k", "--kill", action="store_true", help="Kill background player")
+    parser.add_argument("-r", "--resume", action="store_true", help="Resume last played")
+    parser.add_argument("-l", "--loop", action="store_true", help="Loop track")
+    parser.add_argument("-s", "--shuffle", action="store_true", help="Shuffle")
+    parser.add_argument("-v", "--volume", type=int, default=config['default_volume'], help="Initial volume")
+    parser.add_argument("-n", "--number", type=int, default=config['search_results_count'], help="Number of results")
+    args = parser.parse_args()
+
+    # Kill Background Daemon
+    if args.kill:
+        if shutil.which("pkill"):
+            if subprocess.run(["pkill", "-f", "playmusic_daemon"]).returncode == 0:
+                console.print("[green]✔ Background player stopped.[/green]")
+            else:
+                console.print("[red]✖ No background player running.[/red]")
+        return
+
+    # Resume Last Track
+    if args.resume:
+        tracks = load_json_list(HIST_FILE)
+        if tracks:
+            play_media(tracks[0], args)
+        else:
+            console.print("[red]✖ No history found to resume.[/red]")
+        return
+
+    # Handle History & Favorites
+    if args.history or args.favs:
+        filepath = HIST_FILE if args.history else FAV_FILE
+        title = "Playback History" if args.history else "Favorites"
+        tracks = load_json_list(filepath)
+        if not tracks:
+            console.print(f"[red]✖ {title} is empty.[/red]")
+            return
+
+        while True:
+            choice = display_menu(tracks, title)
+            if choice == 'q': return
+            elif choice.startswith('x') and choice[1:].isdigit():
+                idx = int(choice[1:]) - 1
+                if 0 <= idx < len(tracks):
+                    deleted = tracks.pop(idx)
+                    with open(filepath, 'w') as f: json.dump(tracks, f, indent=4)
+                    console.print(f"[red]✔ Deleted '{deleted['title']}'[/red]")
+            elif choice.isdigit() and 1 <= int(choice) <= len(tracks):
+                play_media(tracks[int(choice)-1], args)
+                return
+
+    if not args.query:
+        parser.print_help()
+        return
+
+    query = " ".join(args.query)
+    if args.album: query += " full album"
+
+    console.print(f"[magenta]🔎 Searching YouTube for:[/magenta] {query}...")
+
+    # Fetch Data using yt-dlp API
+    ydl_opts = {
+        'format': 'bestaudio',
+        'noplaylist': True,
+        'extract_flat': True,
+        'quiet': True
+    }
+
+    tracks =[]
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            if query.startswith("http"):
+                info = ydl.extract_info(query, download=False)
+                tracks =[{'title': info.get('title', 'Unknown'), 'channel': info.get('uploader', 'N/A'), 'duration': 'Direct', 'url': query}]
+            else:
+                info = ydl.extract_info(f"ytsearch{args.number}:{query}", download=False)
+                for entry in info.get('entries',[]):
+                    # --- BULLETPROOF DURATION PARSING ---
+                    raw_dur = entry.get('duration')
+                    try:
+                        if raw_dur is not None:
+                            m, s = divmod(int(float(raw_dur)), 60)
+                            dur_str = f"{m}:{s:02d}"
+                        else:
+                            dur_str = "Live"
+                    except (ValueError, TypeError):
+                        dur_str = "N/A"
+                    # ------------------------------------
+                    tracks.append({
+                        'title': entry.get('title', 'Unknown'),
+                        'channel': entry.get('channel', 'Unknown'),
+                        'duration': dur_str,
+                        'url': entry.get('url', '')
+                    })
+        except Exception as e:
+            console.print(f"[red]✖ Search failed: {e}[/red]")
+            return
+
+    if not tracks:
+        console.print("[red]✖ No results found.[/red]")
+        return
+
+    if args.first:
+        play_media(tracks[0], args)
+        return
+
+    while True:
+        choice = display_menu(tracks)
+        if choice == 'q': return
+        elif choice.startswith('s') and choice[1:].isdigit():
+            idx = int(choice[1:]) - 1
+            if 0 <= idx < len(tracks):
+                save_track(FAV_FILE, tracks[idx])
+                console.print(f"[green]✔ Saved '{tracks[idx]['title']}' to Favs![/green]")
+        elif choice.startswith('d') and choice[1:].isdigit():
+            idx = int(choice[1:]) - 1
+            if 0 <= idx < len(tracks):
+                console.print(f"[magenta]⬇ Downloading to {DOWNLOAD_DIR}...[/magenta]")
+                subprocess.run(["yt-dlp", "-f", "bestaudio", "-x", "--audio-format", "mp3", "-o", f"{DOWNLOAD_DIR}/%(title)s.%(ext)s", tracks[idx]['url']])
+                console.print("[green]✔ Download Complete![/green]")
+        elif choice.isdigit() and 1 <= int(choice) <= len(tracks):
+            play_media(tracks[int(choice)-1], args)
+            return
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        console.print("\n[red]Exiting...[/red]")
+        sys.exit(0)

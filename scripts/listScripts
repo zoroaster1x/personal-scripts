@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+import sys
+import subprocess
+import shutil
+from rich.console import Console
+from rich.panel import Panel
+
+console = Console()
+
+SCRIPTS = {
+    "playmusic": "Ultimate CLI Music Player & YouTube streamer.",
+    "viddl": "RTX-Accelerated YouTube Video & Playlist Downloader.",
+    "compressvid": "RTX GPU Video Compressor & Smart Optimizer.",
+    "getAudio": "Video-to-MP3 Extractor & Optimizer (Lecture Mode).",
+    "listScripts": "Displays this menu and script documentation."
+}
+
+def print_summary():
+    text = "[bold cyan]My Custom CLI Utilities[/bold cyan]\n\n"
+    for name, desc in SCRIPTS.items():
+        # Ljust pads the script name with spaces so the descriptions line up perfectly
+        text += f"  [bold green]{name.ljust(12)}[/bold green] - {desc}\n"
+    text += "\n[dim]Run `listScripts -h` to see the full help menus for all tools.[/dim]"
+    console.print(Panel(text, border_style="cyan"))
+
+def print_all_helps():
+    # Loop through the core tools and run them without arguments to trigger their help panels
+    for script in["playmusic", "viddl", "compressvid", "getAudio"]:
+        console.print(f"\n[bold magenta]{'='*60}[/bold magenta]")
+        if shutil.which(script):
+            subprocess.run([script])
+        else:
+            console.print(f"[red]✖ '{script}' not found in PATH.[/red]")
+
+if __name__ == "__main__":
+    print_summary()
+    
+    # If -h or --help is passed, print out ALL the help menus
+    if "-h" in sys.argv or "--help" in sys.argv:
+        print_all_helps()

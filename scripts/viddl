@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+import os
+import sys
+import argparse
+import subprocess
+import shutil
+from rich.console import Console
+from rich.panel import Panel
+import yt_dlp
+
+console = Console()
+
+def print_help():
+    help_text = """
+[bold cyan]viddl - The Ultimate CLI Video Downloader[/bold cyan][bold yellow]Usage:[/bold yellow]
+  viddl <URL1> <URL2> ... [options]
+
+[bold yellow]Options:[/bold yellow]
+  [green]-p, --path[/green]      Path to save the file (Default: ~/Downloads)
+  [green]-q, --quality[/green]   Quality level: high, [bold]medium[/bold] (default), low
+  [green]-a, --audio[/green]     Download as Audio ONLY (MP3)
+  [green]-f, --format[/green]    Video container format (mp4, mkv, webm) (Default: mp4)
+  [green]-c, --compress[/green]  Compress video using your RTX 3050 GPU (NVENC HEVC).
+                    Levels: low, [bold]medium[/bold] (default), high
+                    (e.g., pass `-c` for medium, `-c high` for max compression)
+
+[bold yellow]Examples:[/bold yellow]
+  viddl "https://..."                       [dim]# Downloads 720p medium video[/dim]
+  viddl "URL1" "URL2" -q high               [dim]# Batch downloads 1080p+ videos[/dim]
+  viddl "https://..." -p ~/Videos -c        [dim]# Downloads & compresses via GPU[/dim]
+  viddl "https://..." -c high               [dim]# Max GPU compression (tiny file size)[/dim]
+    """
+    console.print(Panel(help_text, border_style="cyan"))
+
+class FilenameCollectorPP(yt_dlp.postprocessor.common.PostProcessor):
+    def __init__(self, collected_list):
+        super().__init__()
+        self.collected_list = collected_list
+
+    def run(self, info):
+        filepath = info.get('filepath')
+        if filepath and filepath not in self.collected_list:
+            self.collected_list.append(filepath)
+        return[], info
+
+def compress_video(file_path, comp_level):
+    if not os.path.exists(file_path): return
+
+    cq_map = {'low': 24, 'medium': 29, 'high': 34}
+    cq_val = cq_map.get(comp_level, 29)
+
+    dir_name, base_name = os.path.split(file_path)
+    name, ext = os.path.splitext(base_name)
+    comp_path = os.path.join(dir_name, f"{name}_compressed{ext}")
+
+    console.print(f"\n[bold magenta]🗜 Compressing ({comp_level}):[/bold magenta] {base_name}")
+    console.print(f"[dim]Using RTX GPU (CUDA Decode + NVENC Encode) at CQ {cq_val}...[/dim]")
+
+    # ADDED: -hwaccel cuda (Full GPU offloading)
+    # TWEAKED: -preset p5 (Better speed balance)
+    ffmpeg_cmd =[
+        "ffmpeg", "-y",
+        "-hwaccel", "cuda",
+        "-i", file_path,
+        "-c:v", "hevc_nvenc", "-preset", "p5", "-cq", str(cq_val),
+        "-c:a", "copy", comp_path
+    ]
+
+    try:
+        result = subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+        if result.returncode != 0:
+            console.print(f"[red]✖ Compression failed![/red]\n[dim]{result.stderr}[/dim]")
+            if os.path.exists(comp_path): os.remove(comp_path)
+            return
+
+        orig_size = os.path.getsize(file_path)
+        comp_size = os.path.getsize(comp_path)
+        diff = orig_size - comp_size
+
+        orig_mb = orig_size / (1024 * 1024)
+        comp_mb = comp_size / (1024 * 1024)
+        diff_mb = diff / (1024 * 1024)
+
+        if diff <= (1024 * 1024) or comp_size >= orig_size:
+            console.print(f"[yellow]⚠ Compression ineffective.[/yellow] (Orig: {orig_mb:.1f}MB ➔ New: {comp_mb:.1f}MB)")
+            console.print("[dim]Discarding compressed version and keeping original.[/dim]")
+            os.remove(comp_path)
+        else:
+            console.print(f"[green]✔ Compression successful![/green] (Orig: {orig_mb:.1f}MB ➔ New: {comp_mb:.1f}MB)")
+            console.print(f"[bold cyan]Saved {diff_mb:.1f} MB![/bold cyan]")
+            os.remove(file_path)
+            os.rename(comp_path, file_path)
+
+    except Exception as e:
+        console.print(f"[red]✖ Error during compression: {e}[/red]")
+        if os.path.exists(comp_path): os.remove(comp_path)
+
+def main():
+    if len(sys.argv) == 1:
+        print_help()
+        return
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("urls", nargs="+", help="Video URLs or Playlists")
+    parser.add_argument("-p", "--path", default="~/Downloads", help="Save directory")
+    parser.add_argument("-q", "--quality", choices=['high', 'medium', 'low'], default='medium', help="Video Quality")
+    parser.add_argument("-a", "--audio", action="store_true", help="Audio only (mp3)")
+    parser.add_argument("-f", "--format", default="mp4", help="Video format")
+    parser.add_argument("-c", "--compress", nargs='?', const='medium', choices=['low', 'medium', 'high'], help="Compress video")
+    args = parser.parse_args()
+
+    save_path = os.path.expanduser(args.path)
+    os.makedirs(save_path, exist_ok=True)
+    output_template = os.path.join(save_path, "%(title)s.%(ext)s")
+
+    console.print(f"[cyan]Target(s):[/cyan]    {len(args.urls)} Link(s) Provided")
+    console.print(f"[cyan]Save Path:[/cyan]    {save_path}")
+
+    # ADDED: concurrent_fragment_downloads = 8
+    # This entirely bypasses YouTube's arbitrary speed throttling!
+    ydl_opts = {
+        'outtmpl': output_template,
+        'merge_output_format': args.format,
+        'quiet': False,
+        'noprogress': False,
+        'concurrent_fragment_downloads': 8,
+    }
+
+    if args.audio:
+        console.print("[magenta]Mode:[/magenta]         Audio Only (MP3)")
+        ydl_opts['format'] = 'bestaudio/best'
+        ydl_opts['postprocessors'] =[{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+        }]
+    else:
+        console.print(f"[magenta]Mode:[/magenta]         Video ({args.quality} quality, {args.format})")
+        if args.quality == 'high':
+            ydl_opts['format'] = f"bestvideo[ext={args.format}]+bestaudio[ext=m4a]/best"
+        elif args.quality == 'medium':
+            ydl_opts['format'] = f"bestvideo[height<=720][ext={args.format}]+bestaudio[ext=m4a]/best"
+        elif args.quality == 'low':
+            ydl_opts['format'] = f"bestvideo[height<=480][ext={args.format}]+bestaudio[ext=m4a]/best"
+
+    downloaded_files =[]
+
+    console.print("\n[bold green]Starting Download...[/bold green]\n")
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.add_post_processor(FilenameCollectorPP(downloaded_files))
+        try:
+            for url in args.urls:
+                ydl.download([url])
+        except KeyboardInterrupt:
+            console.print("\n[red]Download Cancelled by User.[/red]")
+            return
+        except Exception as e:
+            console.print(f"\n[red]Error during download: {e}[/red]")
+
+    console.print(f"\n[bold green]✔ Successfully downloaded {len(downloaded_files)} file(s) to {save_path}![/bold green]")
+
+    if args.compress and not args.audio:
+        if not shutil.which("ffmpeg"):
+            console.print("[red]✖ 'ffmpeg' is missing! Cannot compress videos.[/red]")
+        else:
+            for file_path in downloaded_files:
+                compress_video(file_path, args.compress)
+
+if __name__ == "__main__":
+    main()
