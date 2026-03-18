@@ -1,9 +1,7 @@
 # personal-scripts
-
-A collection of CLI media tools and a system setup script for Arch / CachyOS on an MSI laptop with an NVIDIA GPU. Video compression uses **NVENC** when a compatible GPU is detected and falls back to **libx265** (CPU) automatically, so every script works offline on any Linux machine.
+Some personal scripts I use to setup my system(s) on CachyOS. Included are some useful utility scripts for CLI usage.
 
 ## Scripts
-
 | Script | Description |
 |---|---|
 | **compressvid** | Compress a local video file with smart-replace logic. Uses HEVC via NVENC or libx265. |
@@ -13,7 +11,6 @@ A collection of CLI media tools and a system setup script for Arch / CachyOS on 
 | **listScripts** | Print a summary of all scripts. Pass `-h` to display every script's full help panel. |
 
 ## Quick install
-
 ```bash
 git clone https://github.com/zoroaster1x/personal-scripts.git
 cd personal-scripts
@@ -21,31 +18,16 @@ python setupMSIArch.py        # installs all packages, copies scripts to ~/.loca
 ```
 
 `setupMSIArch.py` installs everything through **paru** or **yay** (whichever is available), including:
-
 - **ffmpeg** – required by compressvid, getAudio, and viddl
 - **python-rich** – pretty terminal output used by every script
 - **yt-dlp** – YouTube downloading (CLI + Python library)
 - **mpv-mpris** / **playerctl** – audio playback for playmusic
-
 It also copies every file in `scripts/` to `~/.local/bin` and makes them executable.
 
-### Manual dependency install
-
-If you only want the scripts without the full system setup:
-
-```bash
-# Arch / CachyOS
-sudo pacman -S ffmpeg mpv yt-dlp python-rich
-
-# Then copy scripts
-cp scripts/* ~/.local/bin/
-chmod +x ~/.local/bin/{compressvid,getAudio,viddl,playmusic,listScripts}
-```
 
 ## Usage
 
 ### compressvid
-
 ```bash
 compressvid video.mp4                   # medium HEVC compression (NVENC or CPU)
 compressvid video.mp4 -c high           # high compression
@@ -57,7 +39,6 @@ compressvid video.mp4 -o out.mp4        # custom output path
 Compression levels map to CQ/CRF values: **light** = 24, **medium** = 29, **high** = 34.
 
 ### getAudio
-
 ```bash
 getAudio video.mp4                      # VBR quality 2 (~192 kbps)
 getAudio lecture.mp4 -l                 # mono 64 kbps (great for speech)
@@ -65,7 +46,6 @@ getAudio video.mp4 -q 0 -o ~/Music/    # best quality, save to directory
 ```
 
 ### viddl
-
 ```bash
 viddl "https://youtube.com/watch?v=..." # 720p, saved to ~/Downloads
 viddl "URL1" "URL2" -q high             # batch 1080p+
@@ -74,11 +54,10 @@ viddl "https://..." -c high -p ~/Vids   # download + max compression
 ```
 
 ### playmusic
-
 ```bash
 playmusic "artist - song"               # search & pick from results
-playmusic "metallica" -f                # auto-play first result
-playmusic "pink floyd" -a -b -l         # album, background, loop
+playmusic "rotary park" -f              # auto-play first result
+playmusic "Hawaii Part II" -a -b -l     # album, background, loop
 playmusic -H                            # show playback history
 playmusic -F                            # show favourites
 playmusic -k                            # kill background player
@@ -88,14 +67,12 @@ Config lives in `~/.config/playmusic/config.json` (timeout, volume, result count
 History and favourites are stored under `~/.local/state/playmusic/`.
 
 ### listScripts
-
 ```bash
 listScripts                             # summary table
 listScripts -h                          # full help for every script
 ```
 
 ## GPU vs CPU encoding
-
 Both **compressvid** and **viddl** probe `ffmpeg -encoders` at runtime:
 
 - **NVENC available** → `hevc_nvenc` with CUDA hardware decode and preset `p5`.
