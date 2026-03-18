@@ -9,9 +9,22 @@ from rich.panel import Panel
 
 console = Console()
 
+def has_nvenc():
+    """Check if NVIDIA NVENC is available by probing ffmpeg for hevc_nvenc."""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True
+        )
+        return "hevc_nvenc" in result.stdout
+    except FileNotFoundError:
+        return False
+
 def print_help():
     help_text = """
-[bold cyan]compressvid - RTX Accelerated Video Compressor[/bold cyan][bold yellow]Usage:[/bold yellow]
+[bold cyan]compressvid - GPU/CPU Video Compressor[/bold cyan]
+
+[bold yellow]Usage:[/bold yellow]
   compressvid <INPUT_FILE> [options]
 
 [bold yellow]Options:[/bold yellow]
@@ -23,6 +36,10 @@ def print_help():
                     If the new file is smaller, it replaces the original.
                     If it's larger or saves < 1MB, it discards the new file.
   [green]-a, --audio[/green]     Also extract the audio into an MP3 (calls getAudio automatically).
+
+[bold yellow]Encoder:[/bold yellow]
+  Uses NVIDIA NVENC (hevc_nvenc) when an NVIDIA GPU is detected.
+  Falls back to CPU encoding (libx265) automatically on other systems.
 
 [bold yellow]Examples:[/bold yellow]
   compressvid "./video.mp4"                        [dim]# Creates "./video - (medium compression).mp4"[/dim]
@@ -70,15 +87,25 @@ def main():
         return
 
     console.print(f"\n[bold magenta]🗜 Compressing ({args.compress}):[/bold magenta] {base_name}")
-    console.print(f"[dim]Using RTX GPU (CUDA Decode + NVENC Encode) at CQ {cq_val}...[/dim]")
 
-    ffmpeg_cmd =[
-        "ffmpeg", "-y",
-        "-hwaccel", "cuda",
-        "-i", input_path,
-        "-c:v", "hevc_nvenc", "-preset", "p5", "-cq", str(cq_val),
-        "-c:a", "copy", comp_path
-    ]
+    use_nvenc = has_nvenc()
+    if use_nvenc:
+        console.print(f"[dim]Using NVIDIA GPU (CUDA Decode + NVENC Encode) at CQ {cq_val}...[/dim]")
+        ffmpeg_cmd =[
+            "ffmpeg", "-y",
+            "-hwaccel", "cuda",
+            "-i", input_path,
+            "-c:v", "hevc_nvenc", "-preset", "p5", "-cq", str(cq_val),
+            "-c:a", "copy", comp_path
+        ]
+    else:
+        console.print(f"[dim]NVENC not found. Using CPU encoding (libx265) at CRF {cq_val}...[/dim]")
+        ffmpeg_cmd =[
+            "ffmpeg", "-y",
+            "-i", input_path,
+            "-c:v", "libx265", "-preset", "medium", "-crf", str(cq_val),
+            "-c:a", "copy", comp_path
+        ]
 
     try:
         result = subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)

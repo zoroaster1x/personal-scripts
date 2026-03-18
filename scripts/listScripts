@@ -9,8 +9,8 @@ console = Console()
 
 SCRIPTS = {
     "playmusic": "Ultimate CLI Music Player & YouTube streamer.",
-    "viddl": "RTX-Accelerated YouTube Video & Playlist Downloader.",
-    "compressvid": "RTX GPU Video Compressor & Smart Optimizer.",
+    "viddl": "YouTube Video & Playlist Downloader (GPU/CPU compression).",
+    "compressvid": "Video Compressor & Smart Optimizer (GPU/CPU).",
     "getAudio": "Video-to-MP3 Extractor & Optimizer (Lecture Mode).",
     "listScripts": "Displays this menu and script documentation."
 }

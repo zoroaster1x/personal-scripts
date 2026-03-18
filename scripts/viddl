@@ -10,9 +10,22 @@ import yt_dlp
 
 console = Console()
 
+def has_nvenc():
+    """Check if NVIDIA NVENC is available by probing ffmpeg for hevc_nvenc."""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True
+        )
+        return "hevc_nvenc" in result.stdout
+    except FileNotFoundError:
+        return False
+
 def print_help():
     help_text = """
-[bold cyan]viddl - The Ultimate CLI Video Downloader[/bold cyan][bold yellow]Usage:[/bold yellow]
+[bold cyan]viddl - The Ultimate CLI Video Downloader[/bold cyan]
+
+[bold yellow]Usage:[/bold yellow]
   viddl <URL1> <URL2> ... [options]
 
 [bold yellow]Options:[/bold yellow]
@@ -20,7 +33,7 @@ def print_help():
   [green]-q, --quality[/green]   Quality level: high, [bold]medium[/bold] (default), low
   [green]-a, --audio[/green]     Download as Audio ONLY (MP3)
   [green]-f, --format[/green]    Video container format (mp4, mkv, webm) (Default: mp4)
-  [green]-c, --compress[/green]  Compress video using your RTX 3050 GPU (NVENC HEVC).
+  [green]-c, --compress[/green]  Compress video after download (NVENC GPU or libx265 CPU).
                     Levels: low, [bold]medium[/bold] (default), high
                     (e.g., pass `-c` for medium, `-c high` for max compression)
 
@@ -28,7 +41,7 @@ def print_help():
   viddl "https://..."                       [dim]# Downloads 720p medium video[/dim]
   viddl "URL1" "URL2" -q high               [dim]# Batch downloads 1080p+ videos[/dim]
   viddl "https://..." -p ~/Videos -c        [dim]# Downloads & compresses via GPU[/dim]
-  viddl "https://..." -c high               [dim]# Max GPU compression (tiny file size)[/dim]
+  viddl "https://..." -c high               [dim]# Max compression (tiny file size)[/dim]
     """
     console.print(Panel(help_text, border_style="cyan"))
 
@@ -54,17 +67,25 @@ def compress_video(file_path, comp_level):
     comp_path = os.path.join(dir_name, f"{name}_compressed{ext}")
 
     console.print(f"\n[bold magenta]🗜 Compressing ({comp_level}):[/bold magenta] {base_name}")
-    console.print(f"[dim]Using RTX GPU (CUDA Decode + NVENC Encode) at CQ {cq_val}...[/dim]")
 
-    # ADDED: -hwaccel cuda (Full GPU offloading)
-    # TWEAKED: -preset p5 (Better speed balance)
-    ffmpeg_cmd =[
-        "ffmpeg", "-y",
-        "-hwaccel", "cuda",
-        "-i", file_path,
-        "-c:v", "hevc_nvenc", "-preset", "p5", "-cq", str(cq_val),
-        "-c:a", "copy", comp_path
-    ]
+    use_nvenc = has_nvenc()
+    if use_nvenc:
+        console.print(f"[dim]Using NVIDIA GPU (CUDA Decode + NVENC Encode) at CQ {cq_val}...[/dim]")
+        ffmpeg_cmd =[
+            "ffmpeg", "-y",
+            "-hwaccel", "cuda",
+            "-i", file_path,
+            "-c:v", "hevc_nvenc", "-preset", "p5", "-cq", str(cq_val),
+            "-c:a", "copy", comp_path
+        ]
+    else:
+        console.print(f"[dim]NVENC not found. Using CPU encoding (libx265) at CRF {cq_val}...[/dim]")
+        ffmpeg_cmd =[
+            "ffmpeg", "-y",
+            "-i", file_path,
+            "-c:v", "libx265", "-preset", "medium", "-crf", str(cq_val),
+            "-c:a", "copy", comp_path
+        ]
 
     try:
         result = subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
