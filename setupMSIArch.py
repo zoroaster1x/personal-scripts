@@ -48,6 +48,9 @@ def main():
         "7zip", "btop", "bun", "darkly-bin", "glances", "micro", "pandoc-cli", "ripgrep", "tree", "zip",
         "wl-clipboard", "xclip", "grim", "slurp", "scrcpy", "veracrypt", "yt-dlp",
 
+        # Script Dependencies (required by scripts/ tools)
+        "ffmpeg", "python-rich",
+
         # Virtualization & Networking
         "qemu-full", "libvirt", "virt-manager", "virt-viewer", "dnsmasq", "vde2", "bridge-utils", "iptables-nft",
         "mullvad-vpn",
