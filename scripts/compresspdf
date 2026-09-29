@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+"""compresspdf - PDF junk remover & lossless compressor.
+
+Strips embedded videos/audio/attachments (the usual cause of absurdly huge
+presentation PDFs), recompresses every lossless stream at max level, and
+packs objects into object streams. Images are left untouched unless
+--shrink-images is passed, so visual quality is preserved by default.
+"""
+
+import os
+import sys
+import argparse
+import shutil
+from io import BytesIO
+
+from rich.console import Console
+from rich.panel import Panel
+
+try:
+    import pikepdf
+except ImportError:
+    pikepdf = None
+
+console = Console()
+
+MEDIA_ANNOT_SUBTYPES = {"/Screen", "/Movie", "/Sound", "/RichMedia", "/3D"}
+MEDIA_ACTION_TYPES = {
+    "/Rendition", "/Movie", "/Sound", "/JavaScript",
+    "/Launch", "/ImportData", "/ImportScript", "/SubmitForm",
+}
+
+HELP = """
+[bold cyan]compresspdf - PDF Junk Remover & Lossless Compressor[/bold cyan]
+
+[bold yellow]Usage:[/bold yellow]
+  compresspdf <INPUT_FILE.pdf> [options]
+
+[bold yellow]Options:[/bold yellow]
+  [green]-o, --output[/green]     Specify an exact output filename/path.
+                      (Default: ./Name-fixed.pdf)
+  [green]-r, --replace[/green]    Smart Replace: if the new file is smaller, it replaces
+                      the original; otherwise the new file is discarded.
+  [green]-k, --keep-media[/green] Keep embedded videos/audio/attachments.
+                      (Default: they are removed - they are dead weight in
+                      almost every PDF viewer.)
+  [green]-i, --shrink-images[/green] Re-encode embedded JPEGs at high quality (95).
+                      Only used when it saves >=5% for that image. This is the
+                      only step that can alter pixels, so it is opt-in.
+  [green]-q, --quality[/green]   JPEG quality for --shrink-images (default: 95).
+  [green]-L, --strip-links[/green] Remove link annotations (web/URL links).
+  [green]-M, --strip-meta[/green] Remove document metadata (title, author, XMP).
+  [green]-f, --force[/green]     Overwrite the output file if it already exists.
+
+[bold yellow]What it does (in order):[/bold yellow]
+  1. Removes embedded media: videos, audio, attachments and their annotations.
+  2. Removes unreferenced objects left behind (fonts, filespecs, renditions).
+  3. Recompresses Flate streams at max level and generates object streams.
+  4. Optionally shrinks JPEGs (-i) and strips links/metadata (-L/-M).
+
+[bold yellow]Examples:[/bold yellow]
+  compresspdf "lecture.pdf"                    [dim]# -> "lecture-fixed.pdf" (lossless)[/dim]
+  compresspdf "lecture.pdf" -r                 [dim]# Replace original if smaller[/dim]
+  compresspdf "lecture.pdf" -i -o small.pdf    [dim]# Also re-encode JPEGs at q95[/dim]
+"""
+
+
+def print_help():
+    console.print(Panel(HELP, border_style="cyan"))
+
+
+def human(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024
+
+
+def is_media_annot(annot):
+    if not isinstance(annot, pikepdf.Dictionary):
+        return False
+    if str(annot.get("/Subtype", "")) in MEDIA_ANNOT_SUBTYPES:
+        return True
+    act = annot.get("/A")
+    if isinstance(act, pikepdf.Dictionary):
+        if str(act.get("/S", "")) in MEDIA_ACTION_TYPES:
+            return True
+        if "/R" in act and "/S" not in act:
+            return True
+    return False
+
+
+def prune_action_key(container):
+    """Drop media/JS actions stored under /OpenAction or /AA."""
+    if not isinstance(container, pikepdf.Dictionary):
+        return False
+    act = container.get("/A")
+    if act is not None and isinstance(act, pikepdf.Dictionary):
+        if str(act.get("/S", "")) in MEDIA_ACTION_TYPES:
+            del container["/A"]
+            return True
+    if str(container.get("/S", "")) in MEDIA_ACTION_TYPES:
+        return True
+    return False
+
+
+def strip_media(pdf):
+    """Remove media annotations and attachment name trees. Returns counts."""
+    annots_removed = 0
+    for page in pdf.pages:
+        annots = page.get("/Annots")
+        if annots is None or not isinstance(annots, pikepdf.Array):
+            continue
+        keep = [a for a in annots if not is_media_annot(a)]
+        if len(keep) != len(annots):
+            annots_removed += len(annots) - len(keep)
+            if keep:
+                page["/Annots"] = pdf.make_indirect(pikepdf.Array(keep))
+            else:
+                del page["/Annots"]
+
+    # Catalog-level actions (OpenAction / additional actions on the document)
+    for key in ("/OpenAction", "/AA"):
+        if key in pdf.Root:
+            val = pdf.Root[key]
+            if key == "/OpenAction" and (
+                prune_action_key(val) if isinstance(val, pikepdf.Dictionary) else False
+            ):
+                del pdf.Root[key]
+                annots_removed += 1
+
+    # Embedded file attachments reachable from the name tree
+    files_removed = 0
+    names = pdf.Root.get("/Names")
+    if isinstance(names, pikepdf.Dictionary) and "/EmbeddedFiles" in names:
+        del names["/EmbeddedFiles"]
+        files_removed += 1
+
+    return annots_removed, files_removed
+
+
+def purge_embedded_streams(pdf):
+    """Blank out /EmbeddedFile streams so the bytes are really gone."""
+    purged = 0
+    for obj in pdf.objects:
+        if isinstance(obj, pikepdf.Stream) and str(obj.get("/Type", "")) == "/EmbeddedFile":
+            try:
+                obj.write(b"")
+                purged += 1
+            except Exception:
+                pass
+    return purged
+
+
+def strip_links(pdf):
+    removed = 0
+    for page in pdf.pages:
+        annots = page.get("/Annots")
+        if annots is None or not isinstance(annots, pikepdf.Array):
+            continue
+        keep = [a for a in annots if str(a.get("/Subtype", "")) != "/Link"]
+        if len(keep) != len(annots):
+            removed += len(annots) - len(keep)
+            if keep:
+                page["/Annots"] = pdf.make_indirect(pikepdf.Array(keep))
+            else:
+                del page["/Annots"]
+    return removed
+
+
+def strip_metadata(pdf):
+    if "/Metadata" in pdf.Root:
+        del pdf.Root["/Metadata"]
+    for key in list(pdf.docinfo.keys()):
+        del pdf.docinfo[key]
+
+
+def embedded_media_bytes(pdf):
+    count = 0
+    total = 0
+    for obj in pdf.objects:
+        if isinstance(obj, pikepdf.Stream) and str(obj.get("/Type", "")) == "/EmbeddedFile":
+            count += 1
+            try:
+                total += len(obj.read_raw_bytes())
+            except Exception:
+                pass
+    return count, total
+
+
+def shrink_images(pdf, quality):
+    """Re-encode DCT (JPEG) images, keeping the original unless we save >=5%."""
+    shrunk = 0
+    saved = 0
+    for obj in pdf.objects:
+        if not isinstance(obj, pikepdf.Stream):
+            continue
+        if str(obj.get("/Subtype", "")) != "/Image":
+            continue
+        filters = obj.get("/Filter")
+        filters = [str(filters)] if isinstance(filters, pikepdf.Name) else [str(f) for f in (filters or [])]
+        if "DCTDecode" not in filters:
+            continue
+        try:
+            from PIL import Image
+            raw = obj.read_bytes()
+            img = Image.open(BytesIO(raw))
+            if img.mode not in ("RGB", "L"):
+                continue
+            old_len = len(raw)
+            buf = BytesIO()
+            img.save(buf, "JPEG", quality=quality, optimize=True, subsampling=0)
+            new_data = buf.getvalue()
+            if len(new_data) < old_len * 0.95:
+                obj.write(new_data, filter=pikepdf.Name("/DCTDecode"))
+                shrunk += 1
+                saved += old_len - len(new_data)
+        except Exception:
+            continue
+    return shrunk, saved
+
+
+def main():
+    if len(sys.argv) == 1:
+        print_help()
+        return
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("input_file", help="Path to the PDF file")
+    parser.add_argument("-o", "--output", help="Specific output file path")
+    parser.add_argument("-r", "--replace", action="store_true", help="Smart replace original")
+    parser.add_argument("-k", "--keep-media", action="store_true", help="Keep embedded media")
+    parser.add_argument("-i", "--shrink-images", action="store_true", help="Re-encode JPEGs")
+    parser.add_argument("-q", "--quality", type=int, default=95, help="JPEG quality (default 95)")
+    parser.add_argument("-L", "--strip-links", action="store_true", help="Remove link annotations")
+    parser.add_argument("-M", "--strip-meta", action="store_true", help="Remove metadata")
+    parser.add_argument("-f", "--force", action="store_true", help="Overwrite output if it exists")
+    args = parser.parse_args()
+
+    if pikepdf is None:
+        console.print("[red]✖ 'pikepdf' is missing! Install it (Arch: python-pikepdf / Fedora: python3-pikepdf).[/red]")
+        return
+
+    if not shutil.which("qpdf"):
+        console.print("[red]✖ 'qpdf' is missing! Install it (sudo pacman -S qpdf / sudo dnf install qpdf).[/red]")
+        return
+
+    input_path = os.path.expanduser(args.input_file)
+    if not os.path.exists(input_path):
+        console.print(f"[red]✖ Error: File '{input_path}' not found.[/red]")
+        return
+
+    dir_name, base_name = os.path.split(input_path)
+    name, ext = os.path.splitext(base_name)
+    if not ext:
+        ext = ".pdf"
+
+    if args.output:
+        out_path = os.path.expanduser(args.output)
+    else:
+        out_path = os.path.join(dir_name, f"{name}-fixed{ext}")
+
+    if os.path.abspath(input_path) == os.path.abspath(out_path):
+        console.print("[red]✖ Error: Output path is the same as the input. Use -r to replace it.[/red]")
+        return
+    if os.path.exists(out_path) and not args.force:
+        console.print(f"[red]✖ Output already exists:[/red] {out_path}\n[dim]Use -f to overwrite.[/dim]")
+        return
+
+    orig_size = os.path.getsize(input_path)
+    console.print(f"\n[bold magenta]🧹 Cleaning & compressing:[/bold magenta] {base_name}")
+
+    try:
+        pdf = pikepdf.open(input_path)
+    except Exception as e:
+        console.print(f"[red]✖ Could not open PDF: {e}[/red]")
+        return
+
+    total_pages = len(pdf.pages)
+
+    if args.keep_media:
+        media_files, media_bytes = embedded_media_bytes(pdf)
+        if media_files:
+            console.print(f"[dim]Keeping {media_files} embedded media file(s), {human(media_bytes)}[/dim]")
+    else:
+        media_files, media_bytes = embedded_media_bytes(pdf)
+        annots_removed, files_removed = strip_media(pdf)
+        purge_embedded_streams(pdf)
+        parts = []
+        if media_files:
+            parts.append(f"{media_files} embedded media file(s), {human(media_bytes)}")
+        if annots_removed:
+            parts.append(f"{annots_removed} media annotation(s)")
+        if files_removed:
+            parts.append(f"{files_removed} attachment tree(s)")
+        if parts:
+            console.print(f"[green]✔ Removed:[/green] {', '.join(parts)}")
+        else:
+            console.print("[dim]No embedded media found.[/dim]")
+
+    if args.strip_links:
+        n = strip_links(pdf)
+        console.print(f"[green]✔ Removed {n} link annotation(s).[/green]" if n else "[dim]No links found.[/dim]")
+
+    if args.strip_meta:
+        strip_metadata(pdf)
+        console.print("[green]✔ Metadata stripped.[/green]")
+
+    if args.shrink_images:
+        shrunk, saved = shrink_images(pdf, args.quality)
+        if shrunk:
+            console.print(f"[green]✔ Re-encoded {shrunk} JPEG(s), saving {human(saved)}.[/green]")
+        else:
+            console.print("[dim]No JPEGs worth re-encoding.[/dim]")
+
+    save_opts = dict(
+        compress_streams=True,
+        recompress_flate=True,
+        stream_decode_level=pikepdf.StreamDecodeLevel.generalized,
+        object_stream_mode=pikepdf.ObjectStreamMode.generate,
+    )
+    pdf.save(out_path, **save_opts)
+    pdf.close()
+
+    # Sanity check: the output must reopen with the same page count.
+    try:
+        check = pikepdf.open(out_path)
+        out_pages = len(check.pages)
+        check.close()
+        if out_pages != total_pages:
+            console.print(f"[red]✖ Verification failed: page count changed {total_pages} → {out_pages}. Discarding output.[/red]")
+            os.remove(out_path)
+            return
+    except Exception as e:
+        console.print(f"[red]✖ Output failed to reopen: {e}. Discarding.[/red]")
+        if os.path.exists(out_path):
+            os.remove(out_path)
+        return
+
+    new_size = os.path.getsize(out_path)
+    diff = orig_size - new_size
+
+    if args.replace:
+        if new_size >= orig_size:
+            console.print(f"[yellow]⚠ No savings.[/yellow] (Orig: {human(orig_size)} ➔ New: {human(new_size)})")
+            console.print("[dim]Discarding new file and keeping original.[/dim]")
+            os.remove(out_path)
+        else:
+            os.replace(out_path, input_path)
+            console.print(f"[green]✔ Smart Replace successful![/green] ({human(orig_size)} ➔ {human(new_size)})")
+            console.print(f"[bold cyan]Saved {human(diff)} ({diff / orig_size * 100:.0f}%)![/bold cyan]")
+            console.print(f"[dim]Replaced: {input_path}[/dim]\n")
+    else:
+        console.print("[green]✔ Compression complete![/green]")
+        console.print(f"Pages: [cyan]{total_pages}[/cyan]   Original: [yellow]{human(orig_size)}[/yellow] ➔ New: [green]{human(new_size)}[/green]")
+        if diff > 0:
+            console.print(f"[bold cyan]Saved {human(diff)} ({diff / orig_size * 100:.0f}%)![/bold cyan]")
+        else:
+            console.print("[bold red]Warning: output is larger than the original.[/bold red]")
+        console.print(f"[dim]Saved to: {out_path}[/dim]\n")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        console.print("\n[red]Cancelled by user.[/red]")

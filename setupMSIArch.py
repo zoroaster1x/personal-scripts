@@ -49,7 +49,7 @@ def main():
         "wl-clipboard", "xclip", "grim", "slurp", "scrcpy", "veracrypt", "yt-dlp",
 
         # Script Dependencies (required by scripts/ tools)
-        "ffmpeg", "python-rich",
+        "ffmpeg", "python-rich", "python-pikepdf", "qpdf",
 
         # Virtualization & Networking
         "qemu-full", "libvirt", "virt-manager", "virt-viewer", "dnsmasq", "vde2", "bridge-utils", "iptables-nft",

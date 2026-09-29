@@ -11,6 +11,7 @@ SCRIPTS = {
     "playmusic": "Ultimate CLI Music Player & YouTube streamer.",
     "viddl": "YouTube Video & Playlist Downloader (GPU/CPU compression).",
     "compressvid": "Video Compressor & Smart Optimizer (GPU/CPU).",
+    "compresspdf": "PDF Media Stripper & Lossless Compressor.",
     "getAudio": "Video-to-MP3 Extractor & Optimizer (Lecture Mode).",
     "listScripts": "Displays this menu and script documentation."
 }
@@ -25,7 +26,7 @@ def print_summary():
 
 def print_all_helps():
     # Loop through the core tools and run them without arguments to trigger their help panels
-    for script in["playmusic", "viddl", "compressvid", "getAudio"]:
+    for script in["playmusic", "viddl", "compressvid", "compresspdf", "getAudio"]:
         console.print(f"\n[bold magenta]{'='*60}[/bold magenta]")
         if shutil.which(script):
             subprocess.run([script])
